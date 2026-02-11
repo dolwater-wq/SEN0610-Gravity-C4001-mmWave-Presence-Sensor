@@ -3,7 +3,7 @@
  * @brief "Сторож": одновременное прослушивание 4 датчиков по UART на ESP32/S3.
  *
  * Важно по железу:
- *  - У ESP32/S3 обычно 3 аппаратных UART, поэтому 4-й канал читается через SoftwareSerial.
+ *  - У ESP32/S3 обычно 3 аппаратных UART, поэтому 4-й канал читается через software UART (EspSoftwareSerial).
  *  - Это не "по кругу": все 4 канала опрашиваются в каждом проходе loop().
  *
  * Пары RX/TX по умолчанию:
@@ -16,7 +16,15 @@
  */
 
 #include <Arduino.h>
-#include <SoftwareSerial.h>
+#if __has_include(<EspSoftwareSerial.h>)
+  #include <EspSoftwareSerial.h>
+  using SoftUart = EspSoftwareSerial::UART;
+#elif __has_include(<SoftwareSerial.h>)
+  #include <SoftwareSerial.h>
+  using SoftUart = SoftwareSerial;
+#else
+  #error "No software UART library found. Install EspSoftwareSerial from Arduino Library Manager."
+#endif
 
 struct SensorUartPair {
   uint8_t rx;
@@ -38,7 +46,7 @@ static const uint32_t DEBUG_BAUD = 115200;
 HardwareSerial Sensor1(1);
 HardwareSerial Sensor2(2);
 // Канал 3 оставляем для USB Serial, поэтому для S4 используем SoftwareSerial.
-SoftwareSerial Sensor4;
+SoftUart Sensor4;
 
 static unsigned long lastHeartbeatMs = 0;
 
@@ -86,7 +94,11 @@ void setup() {
   Serial2.begin(SENSOR_BAUD, SERIAL_8N1, kPairs[2].rx, kPairs[2].tx);
 
   // 4-й датчик через software UART.
+#if __has_include(<EspSoftwareSerial.h>)
   Sensor4.begin(SENSOR_BAUD, SWSERIAL_8N1, kPairs[3].rx, kPairs[3].tx, false, 128);
+#else
+  Sensor4.begin(SENSOR_BAUD);
+#endif
 
   Serial.println("=== Storozh 4-sensor listener (parallel) ===");
   Serial.println("Simultaneous read: S1, S2, S3, S4 in each loop pass.");
