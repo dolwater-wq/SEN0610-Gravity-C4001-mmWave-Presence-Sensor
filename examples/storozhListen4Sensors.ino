@@ -10,7 +10,8 @@
  *
  * Режимы работы:
  *  - Если доступен software UART (EspSoftwareSerial / SoftwareSerial), все 4 канала читаются в каждом loop().
- *  - Если software UART недоступен, каналы S3 и S4 читаются поочередно через один Hardware UART.
+ *  - Если software UART недоступен, каналы S3 и S4 читаются поочередно через один Hardware UART
+ *    с фиксированным окном прослушивания (без постоянного "no data"-спама).
  *
  * Serial monitor: 115200
  */
@@ -43,6 +44,7 @@ SensorUartPair kPairs[] = {
 
 static const uint32_t SENSOR_BAUD = 9600;
 static const uint32_t DEBUG_BAUD = 115200;
+static const uint16_t FALLBACK_WINDOW_MS = 220;
 
 HardwareSerial Sensor1(1);
 HardwareSerial Sensor2(2);
@@ -53,6 +55,9 @@ SoftUart Sensor4;
 
 static unsigned long lastHeartbeatMs = 0;
 static bool readS3ThisTurn = true;
+static unsigned long fallbackSwitchMs = 0;
+static bool fallbackBusReady = false;
+static const char *fallbackActiveLabel = "S3";
 
 void printHex(uint8_t b) {
   if (b < 0x10) {
@@ -103,9 +108,8 @@ void setup() {
   #endif
   Serial.println("=== Storozh 4-sensor listener (parallel mode) ===");
 #else
-  SharedBus.begin(SENSOR_BAUD, SERIAL_8N1, kPairs[2].rx, kPairs[2].tx);
   Serial.println("=== Storozh 4-sensor listener (fallback mode) ===");
-  Serial.println("No software UART library found: S3/S4 are read alternately via one Hardware UART.");
+  Serial.println("No software UART library found: S3/S4 are read alternately via one Hardware UART window.");
 #endif
 
   Serial.println("Pins: S1=2/1, S2=3/4, S3=5/6, S4=11/10");
@@ -122,21 +126,29 @@ void loop() {
   drainStream(Sensor4, kPairs[3].label, anyData);
 #else
   // Alternate S3 and S4 over one UART when software UART is unavailable.
-  const SensorUartPair &active = readS3ThisTurn ? kPairs[2] : kPairs[3];
-  SharedBus.end();
-  SharedBus.begin(SENSOR_BAUD, SERIAL_8N1, active.rx, active.tx);
-  delay(2);
-  drainStream(SharedBus, active.label, anyData);
-  readS3ThisTurn = !readS3ThisTurn;
+  const unsigned long now = millis();
+  if (!fallbackBusReady || (now - fallbackSwitchMs >= FALLBACK_WINDOW_MS)) {
+    const SensorUartPair &active = readS3ThisTurn ? kPairs[2] : kPairs[3];
+    SharedBus.end();
+    SharedBus.begin(SENSOR_BAUD, SERIAL_8N1, active.rx, active.tx);
+    delay(2);
+    fallbackActiveLabel = active.label;
+    fallbackSwitchMs = now;
+    fallbackBusReady = true;
+    readS3ThisTurn = !readS3ThisTurn;
+  }
+
+  // Drain current active S3/S4 bus each loop pass.
+  drainStream(SharedBus, fallbackActiveLabel, anyData);
 #endif
 
-  const unsigned long now = millis();
-  if (!anyData && now - lastHeartbeatMs > 1000) {
-    lastHeartbeatMs = now;
+  const unsigned long now2 = millis();
+  if (!anyData && now2 - lastHeartbeatMs > 3000) {
+    lastHeartbeatMs = now2;
 #if HAVE_SOFT_UART
     Serial.println("[listen] no data on all channels");
 #else
-    Serial.println("[listen] no data (fallback mode active)");
+    Serial.println("[listen] no data yet (fallback mode active)");
 #endif
   }
 
