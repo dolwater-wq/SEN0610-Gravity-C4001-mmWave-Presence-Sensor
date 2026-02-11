@@ -17,3 +17,5 @@
 - `examples/c1001Basics.ino` — базовый пример для C1001 с ESP32 Wi‑Fi AP, BLE (PIN 123456) и страницей Control Motion (статусы 0/1/2 + аларм).
 
 - `examples/storozhC4001_25m.ino` — стартовый скетч проекта «Сторож» для 25m C4001 24GHz (чтение цели + команды stop/start/save/status и micro_on/micro_off).
+
+- `examples/storozhListen4Sensors.ino` — прослушивание 4 датчиков по кругу (RX/TX: 2/1, 3/4, 5/6, 11/10) с выводом сырого UART потока в Serial Monitor.
