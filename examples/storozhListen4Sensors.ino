@@ -1,6 +1,10 @@
 /*!
  * @file storozhListen4Sensors.ino
- * @brief "Сторож": последовательное прослушивание 4 датчиков по UART на ESP32/S3.
+ * @brief "Сторож": одновременное прослушивание 4 датчиков по UART на ESP32/S3.
+ *
+ * Важно по железу:
+ *  - У ESP32/S3 обычно 3 аппаратных UART, поэтому 4-й канал читается через SoftwareSerial.
+ *  - Это не "по кругу": все 4 канала опрашиваются в каждом проходе loop().
  *
  * Пары RX/TX по умолчанию:
  *  1) 2 / 1
@@ -8,13 +12,11 @@
  *  3) 5 / 6
  *  4) 11 / 10
  *
- * Логика: один UART-порт ESP32 переключается по кругу между парами пинов
- * и выводит "сырой" поток каждой линии в Serial Monitor.
- *
  * Serial monitor: 115200
  */
 
 #include <Arduino.h>
+#include <SoftwareSerial.h>
 
 struct SensorUartPair {
   uint8_t rx;
@@ -32,19 +34,13 @@ SensorUartPair kPairs[] = {
 
 static const uint32_t SENSOR_BAUD = 9600;
 static const uint32_t DEBUG_BAUD = 115200;
-static const uint16_t LISTEN_WINDOW_MS = 220;
-static const uint16_t GAP_MS = 30;
 
-HardwareSerial RadarBus(1);
+HardwareSerial Sensor1(1);
+HardwareSerial Sensor2(2);
+// Канал 3 оставляем для USB Serial, поэтому для S4 используем SoftwareSerial.
+SoftwareSerial Sensor4;
 
-size_t currentPair = 0;
-
-void openPair(const SensorUartPair &pair) {
-  RadarBus.end();
-  delay(2);
-  RadarBus.begin(SENSOR_BAUD, SERIAL_8N1, pair.rx, pair.tx);
-  delay(3);
-}
+static unsigned long lastHeartbeatMs = 0;
 
 void printHex(uint8_t b) {
   if (b < 0x10) {
@@ -53,43 +49,27 @@ void printHex(uint8_t b) {
   Serial.print(b, HEX);
 }
 
-void listenPair(const SensorUartPair &pair) {
-  Serial.print("[LISTEN] ");
-  Serial.print(pair.label);
-  Serial.print(" RX=");
-  Serial.print(pair.rx);
-  Serial.print(" TX=");
-  Serial.println(pair.tx);
+template <typename TSerial>
+void drainStream(TSerial &bus, const char *label, bool &anyData) {
+  while (bus.available() > 0) {
+    const uint8_t b = static_cast<uint8_t>(bus.read());
+    anyData = true;
 
-  const uint32_t t0 = millis();
-  bool gotData = false;
+    Serial.print(label);
+    Serial.print(" [HEX] 0x");
+    printHex(b);
 
-  while (millis() - t0 < LISTEN_WINDOW_MS) {
-    while (RadarBus.available() > 0) {
-      const uint8_t b = static_cast<uint8_t>(RadarBus.read());
-      gotData = true;
-
-      Serial.print(pair.label);
-      Serial.print(" [HEX] 0x");
-      printHex(b);
-
-      if (b >= 32 && b <= 126) {
-        Serial.print(" [ASCII] '");
-        Serial.print(static_cast<char>(b));
-        Serial.println("'");
-      } else if (b == '\r') {
-        Serial.println(" [ASCII] \\r");
-      } else if (b == '\n') {
-        Serial.println(" [ASCII] \\n");
-      } else {
-        Serial.println();
-      }
+    if (b >= 32 && b <= 126) {
+      Serial.print(" [ASCII] '");
+      Serial.print(static_cast<char>(b));
+      Serial.println("'");
+    } else if (b == '\r') {
+      Serial.println(" [ASCII] \\r");
+    } else if (b == '\n') {
+      Serial.println(" [ASCII] \\n");
+    } else {
+      Serial.println();
     }
-  }
-
-  if (!gotData) {
-    Serial.print(pair.label);
-    Serial.println(" [no data]");
   }
 }
 
@@ -99,19 +79,33 @@ void setup() {
     delay(5);
   }
 
-  Serial.println("=== Storozh 4-sensor listener ===");
-  Serial.println("Round-robin: S1 -> S2 -> S3 -> S4");
-  Serial.println("Edit kPairs[] if you change wiring.");
+  Sensor1.begin(SENSOR_BAUD, SERIAL_8N1, kPairs[0].rx, kPairs[0].tx);
+  Sensor2.begin(SENSOR_BAUD, SERIAL_8N1, kPairs[1].rx, kPairs[1].tx);
 
-  openPair(kPairs[currentPair]);
+  // Для 3-го датчика используем Serial2 переназначением на нужные GPIO.
+  Serial2.begin(SENSOR_BAUD, SERIAL_8N1, kPairs[2].rx, kPairs[2].tx);
+
+  // 4-й датчик через software UART.
+  Sensor4.begin(SENSOR_BAUD, SWSERIAL_8N1, kPairs[3].rx, kPairs[3].tx, false, 128);
+
+  Serial.println("=== Storozh 4-sensor listener (parallel) ===");
+  Serial.println("Simultaneous read: S1, S2, S3, S4 in each loop pass.");
+  Serial.println("Pin pairs: 2/1, 3/4, 5/6, 11/10");
 }
 
 void loop() {
-  const SensorUartPair &pair = kPairs[currentPair];
+  bool anyData = false;
 
-  openPair(pair);
-  listenPair(pair);
+  drainStream(Sensor1, kPairs[0].label, anyData);
+  drainStream(Sensor2, kPairs[1].label, anyData);
+  drainStream(Serial2, kPairs[2].label, anyData);
+  drainStream(Sensor4, kPairs[3].label, anyData);
 
-  currentPair = (currentPair + 1) % (sizeof(kPairs) / sizeof(kPairs[0]));
-  delay(GAP_MS);
+  const unsigned long now = millis();
+  if (!anyData && now - lastHeartbeatMs > 1000) {
+    lastHeartbeatMs = now;
+    Serial.println("[listen] no data on all channels");
+  }
+
+  delay(5);
 }
