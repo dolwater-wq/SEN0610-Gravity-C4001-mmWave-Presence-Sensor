@@ -19,12 +19,21 @@
  */
 
 #include <Arduino.h>
+#include <math.h>
 
 struct SensorPair {
   uint8_t rx;
   uint8_t tx;
   const char *name;
   bool locked;
+};
+
+struct SensorRuntime {
+  bool lastTarget;
+  float lastRange;
+  float lastSpeed;
+  uint32_t lastEnergy;
+  unsigned long lastZeroPrintMs;
 };
 
 // При необходимости меняйте пары здесь.
@@ -43,9 +52,11 @@ static const uint16_t LISTEN_WINDOW_MS = 210;
 static const uint16_t SWITCH_GAP_MS = 4;
 static const uint16_t RETRY_SWAP_WINDOW_MS = 120;
 static const bool PRINT_RAW_BYTES = false;
+static const uint16_t ZERO_HEARTBEAT_MS = 1200;
 
 HardwareSerial RadarBus(1);
 size_t activeSensor = 0;
+SensorRuntime gState[sizeof(kSensors) / sizeof(kSensors[0])] = {};
 
 void openSensorBus(uint8_t rx, uint8_t tx) {
   RadarBus.end();
@@ -79,17 +90,92 @@ void printByteTagged(const SensorPair &s, uint8_t b) {
   }
 }
 
-void printFrame(const SensorPair &s, const String &frame) {
-  const uint32_t t = millis();
-  Serial.print('[');
-  Serial.print(t);
-  Serial.print(" ms] ");
-  Serial.print(s.name);
-  Serial.print(" [FRAME] ");
-  Serial.println(frame);
+String csvField(const String &line, int fieldIndex) {
+  int start = 0;
+  int idx = 0;
+  while (idx < fieldIndex) {
+    int c = line.indexOf(',', start);
+    if (c < 0) {
+      return "";
+    }
+    start = c + 1;
+    idx++;
+  }
+  int end = line.indexOf(',', start);
+  if (end < 0) {
+    end = line.length();
+  }
+  String out = line.substring(start, end);
+  out.trim();
+  return out;
 }
 
-bool listenWindow(const SensorPair &s, uint8_t rx, uint8_t tx, uint16_t windowMs, bool printScanHeader) {
+void reportParsedFrame(size_t sensorIndex, const String &frame) {
+  if (!frame.startsWith("$DFDMD")) {
+    return;
+  }
+
+  SensorRuntime &st = gState[sensorIndex];
+  const SensorPair &sp = kSensors[sensorIndex];
+
+  const int targetCount = csvField(frame, 1).toInt();
+  if (targetCount <= 0) {
+    if (st.lastTarget || (millis() - st.lastZeroPrintMs > ZERO_HEARTBEAT_MS)) {
+      Serial.print('[');
+      Serial.print(millis());
+      Serial.print(" ms] ");
+      Serial.print(sp.name);
+      Serial.println(" [TARGET] none");
+      st.lastZeroPrintMs = millis();
+    }
+    st.lastTarget = false;
+    return;
+  }
+
+  const float range = csvField(frame, 3).toFloat();
+  const float speed = csvField(frame, 4).toFloat();
+  const uint32_t energy = static_cast<uint32_t>(csvField(frame, 5).toInt());
+
+  const bool changed = (!st.lastTarget)
+    || fabsf(range - st.lastRange) > 0.03f
+    || fabsf(speed - st.lastSpeed) > 0.03f
+    || (energy != st.lastEnergy);
+
+  if (changed) {
+    Serial.print('[');
+    Serial.print(millis());
+    Serial.print(" ms] ");
+    Serial.print(sp.name);
+    Serial.print(" [TARGET] count=");
+    Serial.print(targetCount);
+    Serial.print(" range=");
+    Serial.print(range, 3);
+    Serial.print("m speed=");
+    Serial.print(speed, 3);
+    Serial.print("m/s energy=");
+    Serial.println(energy);
+  }
+
+  st.lastTarget = true;
+  st.lastRange = range;
+  st.lastSpeed = speed;
+  st.lastEnergy = energy;
+}
+
+void printFrame(size_t sensorIndex, const SensorPair &s, const String &frame) {
+  if (PRINT_RAW_BYTES) {
+    const uint32_t t = millis();
+    Serial.print('[');
+    Serial.print(t);
+    Serial.print(" ms] ");
+    Serial.print(s.name);
+    Serial.print(" [FRAME] ");
+    Serial.println(frame);
+  }
+  reportParsedFrame(sensorIndex, frame);
+}
+
+bool listenWindow(size_t sensorIndex, const SensorPair &s, uint8_t rx, uint8_t tx, uint16_t windowMs, bool printScanHeader) {
   if (printScanHeader) {
     Serial.print("[SCAN] ");
     Serial.print(s.name);
@@ -118,7 +204,7 @@ bool listenWindow(const SensorPair &s, uint8_t rx, uint8_t tx, uint16_t windowMs
         frame = "$";
       } else if (b == '\n') {
         if (frame.length() > 0) {
-          printFrame(s, frame);
+          printFrame(sensorIndex, s, frame);
           frame = "";
         }
       } else if (b >= 32 && b <= 126) {
@@ -138,11 +224,11 @@ bool listenWindow(const SensorPair &s, uint8_t rx, uint8_t tx, uint16_t windowMs
 void listenCurrentSensor() {
   SensorPair &s = kSensors[activeSensor];
 
-  bool gotData = listenWindow(s, s.rx, s.tx, LISTEN_WINDOW_MS, true);
+  bool gotData = listenWindow(activeSensor, s, s.rx, s.tx, LISTEN_WINDOW_MS, true);
 
   // If channel is silent, try swapped RX/TX once and lock whichever works (auto-fix pair).
   if (!gotData && !s.locked) {
-    gotData = listenWindow(s, s.tx, s.rx, RETRY_SWAP_WINDOW_MS, false);
+    gotData = listenWindow(activeSensor, s, s.tx, s.rx, RETRY_SWAP_WINDOW_MS, false);
     if (gotData) {
       const uint8_t oldRx = s.rx;
       s.rx = s.tx;
@@ -178,7 +264,7 @@ void setup() {
   Serial.println("=== Zorkiy Glaz: sequential 4-sensor listener ===");
   Serial.println("Sensors stay powered. ESP32 only switches listening UART.");
   Serial.println("Order: S1(1/2) -> S2(4/3) -> S3(6/5) -> S4(10/11)");
-  Serial.println("Output mode: FRAME (set PRINT_RAW_BYTES=true for byte dump)");
+  Serial.println("Output mode: parsed TARGET summary (set PRINT_RAW_BYTES=true for byte dump)");
 }
 
 void loop() {
