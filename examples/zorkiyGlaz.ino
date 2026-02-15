@@ -24,14 +24,15 @@ struct SensorPair {
   uint8_t rx;
   uint8_t tx;
   const char *name;
+  bool locked;
 };
 
 // При необходимости меняйте пары здесь.
 SensorPair kSensors[] = {
-  {2, 1, "S1"},
-  {3, 4, "S2"},
-  {5, 6, "S3"},
-  {10, 11, "S4"},
+  {2, 1, "S1", false},
+  {3, 4, "S2", false},
+  {5, 6, "S3", false},
+  {10, 11, "S4", false},
 };
 
 static const uint32_t SENSOR_BAUD = 9600;
@@ -40,14 +41,15 @@ static const uint32_t DEBUG_BAUD = 115200;
 // По вашим замерам пакет примерно раз в ~196 мс, поэтому окно слушания чуть больше.
 static const uint16_t LISTEN_WINDOW_MS = 210;
 static const uint16_t SWITCH_GAP_MS = 4;
+static const uint16_t RETRY_SWAP_WINDOW_MS = 120;
 
 HardwareSerial RadarBus(1);
 size_t activeSensor = 0;
 
-void openSensorBus(const SensorPair &s) {
+void openSensorBus(uint8_t rx, uint8_t tx) {
   RadarBus.end();
   delay(1);
-  RadarBus.begin(SENSOR_BAUD, SERIAL_8N1, s.rx, s.tx);
+  RadarBus.begin(SENSOR_BAUD, SERIAL_8N1, rx, tx);
 }
 
 void printByteTagged(const SensorPair &s, uint8_t b) {
@@ -76,26 +78,54 @@ void printByteTagged(const SensorPair &s, uint8_t b) {
   }
 }
 
-void listenCurrentSensor() {
-  const SensorPair &s = kSensors[activeSensor];
-  openSensorBus(s);
+bool listenWindow(const SensorPair &s, uint8_t rx, uint8_t tx, uint16_t windowMs, bool printScanHeader) {
+  if (printScanHeader) {
+    Serial.print("[SCAN] ");
+    Serial.print(s.name);
+    Serial.print(" RX=");
+    Serial.print(rx);
+    Serial.print(" TX=");
+    Serial.println(tx);
+  }
+
+  openSensorBus(rx, tx);
 
   const uint32_t started = millis();
   bool gotData = false;
 
-  Serial.print("[SCAN] ");
-  Serial.print(s.name);
-  Serial.print(" RX=");
-  Serial.print(s.rx);
-  Serial.print(" TX=");
-  Serial.println(s.tx);
-
-  while (millis() - started < LISTEN_WINDOW_MS) {
+  while (millis() - started < windowMs) {
     while (RadarBus.available() > 0) {
       gotData = true;
       const uint8_t b = static_cast<uint8_t>(RadarBus.read());
       printByteTagged(s, b);
     }
+  }
+
+  return gotData;
+}
+
+void listenCurrentSensor() {
+  SensorPair &s = kSensors[activeSensor];
+
+  bool gotData = listenWindow(s, s.rx, s.tx, LISTEN_WINDOW_MS, true);
+
+  // If channel is silent, try swapped RX/TX once and lock whichever works (auto-fix pair).
+  if (!gotData && !s.locked) {
+    gotData = listenWindow(s, s.tx, s.rx, RETRY_SWAP_WINDOW_MS, false);
+    if (gotData) {
+      const uint8_t oldRx = s.rx;
+      s.rx = s.tx;
+      s.tx = oldRx;
+      s.locked = true;
+      Serial.print("[AUTO] ");
+      Serial.print(s.name);
+      Serial.print(" swapped mapping locked: RX=");
+      Serial.print(s.rx);
+      Serial.print(" TX=");
+      Serial.println(s.tx);
+    }
+  } else if (gotData && !s.locked) {
+    s.locked = true;
   }
 
   if (!gotData) {
