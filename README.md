@@ -7,6 +7,7 @@
 Официальная вики DFRobot с описанием, распиновкой и примерами:
 
 - https://wiki.dfrobot.com/SKU_SEN0610_Gravity_C4001_mmWave_Presence_Sensor_12m_I2C_UART
+- https://dfimg.dfrobot.com/5ea64bf6cf1d8c7738ad2881/wiki/3b88a4ecd7d7f18918a0fa8ba1f970c6.pdf (PDF-документация для C4001 25m / SEN0609)
 
 ## Примеры
 - `examples/motionDetection.ino` — пример скетча для определения движения объектом с использованием библиотеки DFRobot C4001 (с фильтром, который отсекает микродвижения).
