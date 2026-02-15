@@ -7,10 +7,10 @@
  *  - ESP32 не отключает питание датчиков, а только по очереди слушает UART пары.
  *  - Опрос по кругу: S1 -> S2 -> S3 -> S4 -> ...
  *
- * Пары RX/TX по умолчанию:
- *  S1: 2 / 1
- *  S2: 3 / 4
- *  S3: 5 / 6
+ * Пары RX/TX по умолчанию (по логам M5StampS3 + GroveBreakOut):
+ *  S1: 1 / 2
+ *  S2: 4 / 3
+ *  S3: 6 / 5
  *  S4: 10 / 11
  *
  * Скорости:
@@ -29,9 +29,9 @@ struct SensorPair {
 
 // При необходимости меняйте пары здесь.
 SensorPair kSensors[] = {
-  {2, 1, "S1", false},
-  {3, 4, "S2", false},
-  {5, 6, "S3", false},
+  {1, 2, "S1", false},
+  {4, 3, "S2", false},
+  {6, 5, "S3", false},
   {10, 11, "S4", false},
 };
 
@@ -42,6 +42,7 @@ static const uint32_t DEBUG_BAUD = 115200;
 static const uint16_t LISTEN_WINDOW_MS = 210;
 static const uint16_t SWITCH_GAP_MS = 4;
 static const uint16_t RETRY_SWAP_WINDOW_MS = 120;
+static const bool PRINT_RAW_BYTES = false;
 
 HardwareSerial RadarBus(1);
 size_t activeSensor = 0;
@@ -78,6 +79,16 @@ void printByteTagged(const SensorPair &s, uint8_t b) {
   }
 }
 
+void printFrame(const SensorPair &s, const String &frame) {
+  const uint32_t t = millis();
+  Serial.print('[');
+  Serial.print(t);
+  Serial.print(" ms] ");
+  Serial.print(s.name);
+  Serial.print(" [FRAME] ");
+  Serial.println(frame);
+}
+
 bool listenWindow(const SensorPair &s, uint8_t rx, uint8_t tx, uint16_t windowMs, bool printScanHeader) {
   if (printScanHeader) {
     Serial.print("[SCAN] ");
@@ -92,12 +103,32 @@ bool listenWindow(const SensorPair &s, uint8_t rx, uint8_t tx, uint16_t windowMs
 
   const uint32_t started = millis();
   bool gotData = false;
+  String frame;
+  frame.reserve(96);
 
   while (millis() - started < windowMs) {
     while (RadarBus.available() > 0) {
       gotData = true;
       const uint8_t b = static_cast<uint8_t>(RadarBus.read());
-      printByteTagged(s, b);
+      if (PRINT_RAW_BYTES) {
+        printByteTagged(s, b);
+      }
+
+      if (b == '$') {
+        frame = "$";
+      } else if (b == '\n') {
+        if (frame.length() > 0) {
+          printFrame(s, frame);
+          frame = "";
+        }
+      } else if (b >= 32 && b <= 126) {
+        if (frame.length() > 0) {
+          frame += static_cast<char>(b);
+          if (frame.length() > 120) {
+            frame.remove(120);
+          }
+        }
+      }
     }
   }
 
@@ -146,7 +177,8 @@ void setup() {
 
   Serial.println("=== Zorkiy Glaz: sequential 4-sensor listener ===");
   Serial.println("Sensors stay powered. ESP32 only switches listening UART.");
-  Serial.println("Order: S1(2/1) -> S2(3/4) -> S3(5/6) -> S4(10/11)");
+  Serial.println("Order: S1(1/2) -> S2(4/3) -> S3(6/5) -> S4(10/11)");
+  Serial.println("Output mode: FRAME (set PRINT_RAW_BYTES=true for byte dump)");
 }
 
 void loop() {
