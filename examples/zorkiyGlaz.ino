@@ -53,6 +53,7 @@ static const uint16_t SWITCH_GAP_MS = 4;
 static const uint16_t RETRY_SWAP_WINDOW_MS = 120;
 static const bool PRINT_RAW_BYTES = false;
 static const uint16_t ZERO_HEARTBEAT_MS = 1200;
+static const bool PRINT_EVERY_PARSED_FRAME = true;
 
 HardwareSerial RadarBus(1);
 size_t activeSensor = 0;
@@ -120,12 +121,12 @@ void reportParsedFrame(size_t sensorIndex, const String &frame) {
 
   const int targetCount = csvField(frame, 1).toInt();
   if (targetCount <= 0) {
-    if (st.lastTarget || (millis() - st.lastZeroPrintMs > ZERO_HEARTBEAT_MS)) {
+    if (PRINT_EVERY_PARSED_FRAME || st.lastTarget || (millis() - st.lastZeroPrintMs > ZERO_HEARTBEAT_MS)) {
       Serial.print('[');
       Serial.print(millis());
       Serial.print(" ms] ");
       Serial.print(sp.name);
-      Serial.println(" [TARGET] none");
+      Serial.println(" [TARGET] нет цели (0)");
       st.lastZeroPrintMs = millis();
     }
     st.lastTarget = false;
@@ -141,18 +142,18 @@ void reportParsedFrame(size_t sensorIndex, const String &frame) {
     || fabsf(speed - st.lastSpeed) > 0.03f
     || (energy != st.lastEnergy);
 
-  if (changed) {
+  if (PRINT_EVERY_PARSED_FRAME || changed) {
     Serial.print('[');
     Serial.print(millis());
     Serial.print(" ms] ");
     Serial.print(sp.name);
-    Serial.print(" [TARGET] count=");
+    Serial.print(" [TARGET] цель=");
     Serial.print(targetCount);
-    Serial.print(" range=");
+    Serial.print(" | расстояние=");
     Serial.print(range, 3);
-    Serial.print("m speed=");
+    Serial.print(" м | скорость=");
     Serial.print(speed, 3);
-    Serial.print("m/s energy=");
+    Serial.print(" м/с | энергия=");
     Serial.println(energy);
   }
 
@@ -264,7 +265,7 @@ void setup() {
   Serial.println("=== Zorkiy Glaz: sequential 4-sensor listener ===");
   Serial.println("Sensors stay powered. ESP32 only switches listening UART.");
   Serial.println("Order: S1(1/2) -> S2(4/3) -> S3(6/5) -> S4(10/11)");
-  Serial.println("Output mode: parsed TARGET summary (set PRINT_RAW_BYTES=true for byte dump)");
+  Serial.println("Output mode: decoded TARGET (meters/speed/energy). Raw bytes: PRINT_RAW_BYTES=true");
 }
 
 void loop() {
